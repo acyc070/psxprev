@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Drawing;
 using System.IO;
 using System.Windows.Forms;
@@ -111,7 +111,8 @@ namespace PSXPrev.Forms
 
                 optionHumanReadableCheckBox.Enabled = _format == ExportModelFormats.GLTF2 || _format == ExportModelFormats.DAE;
 
-                animationsGroupBox.Enabled = _format == ExportModelFormats.GLTF2;
+                // Enable animations for both glTF2 and OBJ formats
+                animationsGroupBox.Enabled = _format == ExportModelFormats.GLTF2 || _format == ExportModelFormats.OBJ;
 
                 animationsOffRadioButton.Checked = true; // Always turn off animations when switching formats?
             }
@@ -172,6 +173,7 @@ namespace PSXPrev.Forms
                 StrictFloatFormat = optionStrictFloatsCheckBox.Checked,
 
                 ExportAnimations = !animationsOffRadioButton.Checked,
+                ExportAnimationFramesAsOBJ = _format == ExportModelFormats.OBJ && !animationsOffRadioButton.Checked,
             };
             switch (optionModelGroupingComboBox.SelectedIndex)
             {
@@ -297,6 +299,25 @@ namespace PSXPrev.Forms
                 case ExportModelFormats.OBJ:
                     var objExporter = new OBJExporter();
                     count = objExporter.Export(options, entities);
+
+                    // Export animation frames as separate OBJ files if enabled
+                    if (options.ExportAnimationFramesAsOBJ && animations != null && animations.Length > 0)
+                    {
+                        var animExporter = new OBJAnimationExporter();
+                        foreach (var animation in animations)
+                        {
+                            int animCount = 0;
+                            if (options.OBJAnimationExportMode == "perDirectory")
+                            {
+                                animCount = animExporter.ExportFramesPerDirectory(options, entities, animation);
+                            }
+                            else
+                            {
+                                animCount = animExporter.ExportFramesSingleFolder(options, entities, animation);
+                            }
+                            count += animCount;
+                        }
+                    }
                     break;
                 case ExportModelFormats.PLY:
                     var plyExporter = new PLYExporter();
