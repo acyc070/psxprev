@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Runtime.Serialization;
 using Newtonsoft.Json;
@@ -115,7 +115,10 @@ namespace PSXPrev.Common.Exporters
         //public bool ExportTickedAnimations { get; set; }
         [JsonProperty("exportAnimations")]
         public bool ExportAnimations { get; set; }
-
+        [JsonProperty("exportAnimationFramesAsOBJ")]
+        public bool ExportAnimationFramesAsOBJ { get; set; } = false; // Export animation frames as separate OBJ files (OBJ format only)
+        [JsonProperty("objAnimationExportMode")]
+        public string OBJAnimationExportMode { get; set; } = "singleFolder"; // Options: "singleFolder", "perDirectory"
 
 
         // Used for version upgrades to read properties that are no longer present in the current class
@@ -140,6 +143,11 @@ namespace PSXPrev.Common.Exporters
             }
 
             ModelGrouping = Settings.ValidateEnum(ModelGrouping, Defaults.ModelGrouping);
+
+            if (OBJAnimationExportMode == null || (OBJAnimationExportMode != "singleFolder" && OBJAnimationExportMode != "perDirectory"))
+            {
+                OBJAnimationExportMode = "singleFolder";
+            }
 
             _unknownData = null; // We don't need this anymore
         }
