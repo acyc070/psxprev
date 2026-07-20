@@ -22,26 +22,21 @@ namespace PSXPrev.Common.Exporters
         public int Export(ExportModelOptions options, RootEntity[] entities)
         {
             _options = options?.Clone() ?? new ExportModelOptions();
-            // Force any required options for this format here, before calling Validate.
             _options.Validate("obj");
 
             _pngExporter = new PNGExporter();
             _mtlDictionary = new MTLExporter.MaterialDictionary();
             _modelPreparer = new ModelPreparerExporter(_options);
 
-            // Prepare the shared state for all models being exported (mainly setting up tiled textures).
             var groups = _modelPreparer.PrepareAll(entities);
 
             for (var i = 0; i < groups.Length; i++)
             {
                 var group = groups[i];
-                // Prepare the state for the current model being exported.
                 var preparedEntities = _modelPreparer.PrepareCurrent(entities, group, out var preparedModels);
-
                 ExportEntities(i, group, preparedEntities, preparedModels);
             }
 
-            //_pngExporter.Dispose();
             _pngExporter = null;
             _mtlDictionary = null;
             _modelPreparer.Dispose();
@@ -52,8 +47,6 @@ namespace PSXPrev.Common.Exporters
 
         private void ExportEntities(int index, Tuple<int, long> group, RootEntity[] entities, List<ModelEntity> models)
         {
-            // If shared, reuse the dictionary of textures so that we only export them once.
-            // We're using a separate mtl file for each model so that unused materials aren't added.
             if (!_options.ShareTextures)
             {
                 _mtlDictionary.Clear();
@@ -67,24 +60,18 @@ namespace PSXPrev.Common.Exporters
             _normalIndices = new Dictionary<Vector3, int>();
             _uvIndices = new Dictionary<Vector2, int>();
 
-            // Write mtl file reference
             _writer.WriteLine("mtllib {0}", _mtlExporter.FileName);
 
-            // Write vertices and export materials
             foreach (var model in models)
             {
                 WriteModel(model);
             }
 
-            // Write objects/groups and their faces
-            var vertexIndex = 1; // Index for vertex positions and normals (OBJ format is 1-indexed)
-            var uvIndex     = 1; // Index for UVs
+            var vertexIndex = 1;
+            var uvIndex = 1;
             for (var i = 0; i < entities.Length; i++)
             {
-                // Note that models in entities are guaranteed to appear in the same order as in models
                 var entity = entities[i];
-
-                // Write start of object
                 _writer.WriteLine("o object{0}", i);
                 for (var j = 0; j < entity.ChildEntities.Length; j++)
                 {
@@ -102,12 +89,11 @@ namespace PSXPrev.Common.Exporters
             _writer = null;
         }
 
-        // ============================================================
-        // MODIFIED: WriteModel now interpolates VDF vertex/normal data
-        // ============================================================
+        // ------------------------------------------------------------
+        // Main change: build lookup from triangles, not model.Vertices
+        // ------------------------------------------------------------
         private void WriteModel(ModelEntity model)
         {
-            // Export material if we haven't already
             var texture = model.Texture;
             if (NeedsTexture(model) && _mtlExporter.AddMaterial(texture, out var materialId))
             {
@@ -118,25 +104,25 @@ namespace PSXPrev.Common.Exporters
             var worldMatrix = model.WorldMatrix;
             GeomMath.InvertSafe(ref worldMatrix, out var invWorldMatrix);
 
-            // Build a lookup from original vertex position → index.
-            // This is used to map triangle corners to the correct element in the animation arrays.
-            Dictionary<Vector3, int> vertexIndexLookup = null;
-            bool hasVertexAnim = model.InitialVertices != null && model.FinalVertices != null;
-            bool hasNormalAnim = model.InitialNormals != null && model.FinalNormals != null;
+            // Build a dictionary mapping each unique vertex position to an index.
+            // This replaces reliance on a missing model.Vertices property.
+            var vertexIndexLookup = BuildVertexIndexLookup(model);
+            int totalVertexCount = vertexIndexLookup.Count;
 
-            if (hasVertexAnim || hasNormalAnim)
-            {
-                vertexIndexLookup = new Dictionary<Vector3, int>(new Vector3Comparer());
-                for (int i = 0; i < model.Vertices.Length; i++)
-                {
-                    vertexIndexLookup[model.Vertices[i]] = i;
-                }
-            }
+            bool hasVertexAnim = model.InitialVertices != null &&
+                                 model.FinalVertices != null &&
+                                 model.InitialVertices.Length == totalVertexCount &&
+                                 model.FinalVertices.Length == totalVertexCount;
 
-            // Write vertex positions (interpolated if VDF animation is active)
+            bool hasNormalAnim = model.InitialNormals != null &&
+                                 model.FinalNormals != null &&
+                                 model.InitialNormals.Length == totalVertexCount &&
+                                 model.FinalNormals.Length == totalVertexCount;
+
+            // Write vertex positions (interpolated if VDF is active)
             foreach (var triangle in model.Triangles)
             {
-                for (var j = 2; j >= 0; j--)
+                for (int j = 2; j >= 0; j--)
                 {
                     Vector3 localVertex = triangle.Vertices[j];
                     if (hasVertexAnim)
@@ -146,21 +132,19 @@ namespace PSXPrev.Common.Exporters
                             float t = model.Interpolator;
                             localVertex = Vector3.Lerp(model.InitialVertices[idx], model.FinalVertices[idx], t);
                         }
-                        // If lookup fails, fall back to the original vertex (should not happen in practice)
                     }
                     WriteVertexPosition(localVertex, triangle.Colors[j], ref worldMatrix);
                 }
             }
 
-            // Write vertex normals (interpolated if NormalDiff animation is active)
+            // Write normals (interpolated if NormalDiff is active)
             foreach (var triangle in model.Triangles)
             {
-                for (var j = 2; j >= 0; j--)
+                for (int j = 2; j >= 0; j--)
                 {
                     Vector3 localNormal = triangle.Normals[j];
                     if (hasNormalAnim)
                     {
-                        // Use the corresponding vertex to find the index in the normal arrays.
                         Vector3 correspondingVertex = triangle.Vertices[j];
                         if (vertexIndexLookup.TryGetValue(correspondingVertex, out int idx))
                         {
@@ -173,17 +157,36 @@ namespace PSXPrev.Common.Exporters
                 }
             }
 
-            // Write vertex UVs (unchanged)
+            // Write UVs (unchanged)
             if (NeedsTexture(model))
             {
                 foreach (var triangle in model.Triangles)
                 {
-                    for (var j = 2; j >= 0; j--)
+                    for (int j = 2; j >= 0; j--)
                     {
                         WriteUV(triangle.Uv[j]);
                     }
                 }
             }
+        }
+
+        // Build the vertex index lookup from all triangle vertices.
+        private Dictionary<Vector3, int> BuildVertexIndexLookup(ModelEntity model)
+        {
+            var dict = new Dictionary<Vector3, int>(new Vector3Comparer());
+            int index = 0;
+            foreach (var triangle in model.Triangles)
+            {
+                for (int i = 0; i < 3; i++)
+                {
+                    var v = triangle.Vertices[i];
+                    if (!dict.ContainsKey(v))
+                    {
+                        dict.Add(v, index++);
+                    }
+                }
+            }
+            return dict;
         }
 
         private void WriteVertexPosition(Vector3 localVertex, Color3 color, ref Matrix4 worldMatrix)
@@ -195,9 +198,9 @@ namespace PSXPrev.Common.Exporters
                 var tuple = new Tuple<Vector3, Color3>(vertex, colorVec);
                 if (_positionIndices.ContainsKey(tuple))
                 {
-                    return; // Vertex position/color already defined
+                    return;
                 }
-                _positionIndices.Add(tuple, _positionIndices.Count + 1); // +1 because indices are 1-indexed
+                _positionIndices.Add(tuple, _positionIndices.Count + 1);
             }
             var vertexColor = string.Empty;
             if (_options.ExperimentalOBJVertexColor)
@@ -214,9 +217,9 @@ namespace PSXPrev.Common.Exporters
             {
                 if (_normalIndices.ContainsKey(normal))
                 {
-                    return; // Vertex normal already defined
+                    return;
                 }
-                _normalIndices.Add(normal, _normalIndices.Count + 1); // +1 because indices are 1-indexed
+                _normalIndices.Add(normal, _normalIndices.Count + 1);
             }
             _writer.WriteLine("vn {0} {1} {2}", F(normal.X), F(-normal.Y), F(-normal.Z));
         }
@@ -227,9 +230,9 @@ namespace PSXPrev.Common.Exporters
             {
                 if (_uvIndices.ContainsKey(uv))
                 {
-                    return; // Vertex UV already defined
+                    return;
                 }
-                _uvIndices.Add(uv, _uvIndices.Count + 1); // +1 because indices are 1-indexed
+                _uvIndices.Add(uv, _uvIndices.Count + 1);
             }
             _writer.WriteLine("vt {0} {1}", F(uv.X), F(1f - uv.Y));
         }
@@ -241,10 +244,9 @@ namespace PSXPrev.Common.Exporters
             var needsTexture = NeedsTexture(model);
             var materialName = _mtlExporter.GetMaterialName(_options.ExportTextures ? model.Texture : null);
 
-            // Write start of group
             _writer.WriteLine("g group{0}_{1}", objectIndex, groupIndex);
             _writer.WriteLine("usemtl {0}", materialName);
-            // Write group faces
+
             foreach (var triangle in model.Triangles)
             {
                 if (_options.VertexIndexReuse)
@@ -252,7 +254,6 @@ namespace PSXPrev.Common.Exporters
                     _writer.Write("f");
                     for (var j = 2; j >= 0; j--)
                     {
-                        // We're using ref parameters as local variables here, the ref aspect isn't important for VertexIndexReuse.
                         vertexIndex = GetVertexPosition(triangle.Vertices[j], triangle.Colors[j], ref worldMatrix);
                         var normalIndex = GetNormal(triangle.Normals[j], ref invWorldMatrix);
                         if (needsTexture)
@@ -271,13 +272,11 @@ namespace PSXPrev.Common.Exporters
                 {
                     if (needsTexture)
                     {
-                        // v/vt/vn
                         _writer.WriteLine("f {0}/{3}/{0} {1}/{4}/{1} {2}/{5}/{2}",
                                           vertexIndex++, vertexIndex++, vertexIndex++, uvIndex++, uvIndex++, uvIndex++);
                     }
                     else
                     {
-                        // v//vn
                         _writer.WriteLine("f {0}//{0} {1}//{1} {2}//{2}", vertexIndex++, vertexIndex++, vertexIndex++);
                     }
                 }
@@ -317,9 +316,9 @@ namespace PSXPrev.Common.Exporters
             return value.ToString(GeomMath.IntegerFormat, NumberFormatInfo.InvariantInfo);
         }
 
-        // ============================================================
-        // Tolerance comparer for Vector3 (used for vertex index lookup)
-        // ============================================================
+        // ------------------------------------------------------------
+        // Tolerance comparer for stable hashing of floating‑point vertices
+        // ------------------------------------------------------------
         private sealed class Vector3Comparer : IEqualityComparer<Vector3>
         {
             private const float Epsilon = 1e-6f;
@@ -333,7 +332,6 @@ namespace PSXPrev.Common.Exporters
 
             public int GetHashCode(Vector3 v)
             {
-                // Round to the nearest multiple of epsilon to get a stable hash.
                 int hx = (int)Math.Round(v.X / Epsilon);
                 int hy = (int)Math.Round(v.Y / Epsilon);
                 int hz = (int)Math.Round(v.Z / Epsilon);
