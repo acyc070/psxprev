@@ -12,7 +12,7 @@ namespace PSXPrev.Common.Exporters
         private PNGExporter _pngExporter;
         private MTLExporter _mtlExporter;
         private MTLExporter.MaterialDictionary _mtlDictionary;
-        private Dictionary<Tuple<Vector3, Color3>, int> _positionIndices; // position, color
+        private Dictionary<Tuple<Vector3, Color3>, int> _positionIndices;
         private Dictionary<Vector3, int> _normalIndices;
         private Dictionary<Vector2, int> _uvIndices;
         private ModelPreparerExporter _modelPreparer;
@@ -90,7 +90,7 @@ namespace PSXPrev.Common.Exporters
         }
 
         // ------------------------------------------------------------
-        // Main change: build lookup from triangles, not model.Vertices
+        // MODIFIED: WriteModel now uses OriginalVertexIndices and OriginalNormalIndices
         // ------------------------------------------------------------
         private void WriteModel(ModelEntity model)
         {
@@ -104,20 +104,14 @@ namespace PSXPrev.Common.Exporters
             var worldMatrix = model.WorldMatrix;
             GeomMath.InvertSafe(ref worldMatrix, out var invWorldMatrix);
 
-            // Build a dictionary mapping each unique vertex position to an index.
-            // This replaces reliance on a missing model.Vertices property.
-            var vertexIndexLookup = BuildVertexIndexLookup(model);
-            int totalVertexCount = vertexIndexLookup.Count;
-
+            // Check if we have vertex animation data
             bool hasVertexAnim = model.InitialVertices != null &&
                                  model.FinalVertices != null &&
-                                 model.InitialVertices.Length == totalVertexCount &&
-                                 model.FinalVertices.Length == totalVertexCount;
+                                 model.InitialVertices.Length == model.FinalVertices.Length;
 
             bool hasNormalAnim = model.InitialNormals != null &&
                                  model.FinalNormals != null &&
-                                 model.InitialNormals.Length == totalVertexCount &&
-                                 model.FinalNormals.Length == totalVertexCount;
+                                 model.InitialNormals.Length == model.FinalNormals.Length;
 
             // Write vertex positions (interpolated if VDF is active)
             foreach (var triangle in model.Triangles)
@@ -125,9 +119,10 @@ namespace PSXPrev.Common.Exporters
                 for (int j = 2; j >= 0; j--)
                 {
                     Vector3 localVertex = triangle.Vertices[j];
-                    if (hasVertexAnim)
+                    if (hasVertexAnim && triangle.OriginalVertexIndices != null)
                     {
-                        if (vertexIndexLookup.TryGetValue(localVertex, out int idx))
+                        int idx = (int)triangle.OriginalVertexIndices[j];
+                        if (idx >= 0 && idx < model.InitialVertices.Length)
                         {
                             float t = model.Interpolator;
                             localVertex = Vector3.Lerp(model.InitialVertices[idx], model.FinalVertices[idx], t);
@@ -143,10 +138,10 @@ namespace PSXPrev.Common.Exporters
                 for (int j = 2; j >= 0; j--)
                 {
                     Vector3 localNormal = triangle.Normals[j];
-                    if (hasNormalAnim)
+                    if (hasNormalAnim && triangle.OriginalNormalIndices != null)
                     {
-                        Vector3 correspondingVertex = triangle.Vertices[j];
-                        if (vertexIndexLookup.TryGetValue(correspondingVertex, out int idx))
+                        int idx = (int)triangle.OriginalNormalIndices[j];
+                        if (idx >= 0 && idx < model.InitialNormals.Length)
                         {
                             float t = model.Interpolator;
                             localNormal = Vector3.Lerp(model.InitialNormals[idx], model.FinalNormals[idx], t);
@@ -168,25 +163,6 @@ namespace PSXPrev.Common.Exporters
                     }
                 }
             }
-        }
-
-        // Build the vertex index lookup from all triangle vertices.
-        private Dictionary<Vector3, int> BuildVertexIndexLookup(ModelEntity model)
-        {
-            var dict = new Dictionary<Vector3, int>(new Vector3Comparer());
-            int index = 0;
-            foreach (var triangle in model.Triangles)
-            {
-                for (int i = 0; i < 3; i++)
-                {
-                    var v = triangle.Vertices[i];
-                    if (!dict.ContainsKey(v))
-                    {
-                        dict.Add(v, index++);
-                    }
-                }
-            }
-            return dict;
         }
 
         private void WriteVertexPosition(Vector3 localVertex, Color3 color, ref Matrix4 worldMatrix)
@@ -314,29 +290,6 @@ namespace PSXPrev.Common.Exporters
         private static string I(float value)
         {
             return value.ToString(GeomMath.IntegerFormat, NumberFormatInfo.InvariantInfo);
-        }
-
-        // ------------------------------------------------------------
-        // Tolerance comparer for stable hashing of floating‑point vertices
-        // ------------------------------------------------------------
-        private sealed class Vector3Comparer : IEqualityComparer<Vector3>
-        {
-            private const float Epsilon = 1e-6f;
-
-            public bool Equals(Vector3 a, Vector3 b)
-            {
-                return Math.Abs(a.X - b.X) < Epsilon &&
-                       Math.Abs(a.Y - b.Y) < Epsilon &&
-                       Math.Abs(a.Z - b.Z) < Epsilon;
-            }
-
-            public int GetHashCode(Vector3 v)
-            {
-                int hx = (int)Math.Round(v.X / Epsilon);
-                int hy = (int)Math.Round(v.Y / Epsilon);
-                int hz = (int)Math.Round(v.Z / Epsilon);
-                return hx ^ (hy << 8) ^ (hz << 16);
-            }
         }
     }
 }
