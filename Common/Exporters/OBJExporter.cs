@@ -102,6 +102,9 @@ namespace PSXPrev.Common.Exporters
             _writer = null;
         }
 
+        // ============================================================
+        // MODIFIED: WriteModel now interpolates VDF vertex/normal data
+        // ============================================================
         private void WriteModel(ModelEntity model)
         {
             // Export material if we haven't already
@@ -114,27 +117,65 @@ namespace PSXPrev.Common.Exporters
 
             var worldMatrix = model.WorldMatrix;
             GeomMath.InvertSafe(ref worldMatrix, out var invWorldMatrix);
-            // Write vertex positions (and colors if experimental)
+
+            // Build a lookup from original vertex position → index.
+            // This is used to map triangle corners to the correct element in the animation arrays.
+            Dictionary<Vector3, int> vertexIndexLookup = null;
+            bool hasVertexAnim = model.InitialVertices != null && model.FinalVertices != null;
+            bool hasNormalAnim = model.InitialNormals != null && model.FinalNormals != null;
+
+            if (hasVertexAnim || hasNormalAnim)
+            {
+                vertexIndexLookup = new Dictionary<Vector3, int>(new Vector3Comparer());
+                for (int i = 0; i < model.Vertices.Length; i++)
+                {
+                    vertexIndexLookup[model.Vertices[i]] = i;
+                }
+            }
+
+            // Write vertex positions (interpolated if VDF animation is active)
             foreach (var triangle in model.Triangles)
             {
                 for (var j = 2; j >= 0; j--)
                 {
-                    WriteVertexPosition(triangle.Vertices[j], triangle.Colors[j], ref worldMatrix);
+                    Vector3 localVertex = triangle.Vertices[j];
+                    if (hasVertexAnim)
+                    {
+                        if (vertexIndexLookup.TryGetValue(localVertex, out int idx))
+                        {
+                            float t = model.Interpolator;
+                            localVertex = Vector3.Lerp(model.InitialVertices[idx], model.FinalVertices[idx], t);
+                        }
+                        // If lookup fails, fall back to the original vertex (should not happen in practice)
+                    }
+                    WriteVertexPosition(localVertex, triangle.Colors[j], ref worldMatrix);
                 }
             }
 
-            // Write vertex normals
+            // Write vertex normals (interpolated if NormalDiff animation is active)
             foreach (var triangle in model.Triangles)
             {
                 for (var j = 2; j >= 0; j--)
                 {
-                    WriteNormal(triangle.Normals[j], ref invWorldMatrix);
+                    Vector3 localNormal = triangle.Normals[j];
+                    if (hasNormalAnim)
+                    {
+                        // Use the corresponding vertex to find the index in the normal arrays.
+                        Vector3 correspondingVertex = triangle.Vertices[j];
+                        if (vertexIndexLookup.TryGetValue(correspondingVertex, out int idx))
+                        {
+                            float t = model.Interpolator;
+                            localNormal = Vector3.Lerp(model.InitialNormals[idx], model.FinalNormals[idx], t);
+                            localNormal.Normalize();
+                        }
+                    }
+                    WriteNormal(localNormal, ref invWorldMatrix);
                 }
             }
 
+            // Write vertex UVs (unchanged)
             if (NeedsTexture(model))
             {
-                // Write vertex UVs
                 foreach (var triangle in model.Triangles)
                 {
                     for (var j = 2; j >= 0; j--)
@@ -274,6 +315,30 @@ namespace PSXPrev.Common.Exporters
         private static string I(float value)
         {
             return value.ToString(GeomMath.IntegerFormat, NumberFormatInfo.InvariantInfo);
+        }
+
+        // ============================================================
+        // Tolerance comparer for Vector3 (used for vertex index lookup)
+        // ============================================================
+        private sealed class Vector3Comparer : IEqualityComparer<Vector3>
+        {
+            private const float Epsilon = 1e-6f;
+
+            public bool Equals(Vector3 a, Vector3 b)
+            {
+                return Math.Abs(a.X - b.X) < Epsilon &&
+                       Math.Abs(a.Y - b.Y) < Epsilon &&
+                       Math.Abs(a.Z - b.Z) < Epsilon;
+            }
+
+            public int GetHashCode(Vector3 v)
+            {
+                // Round to the nearest multiple of epsilon to get a stable hash.
+                int hx = (int)Math.Round(v.X / Epsilon);
+                int hy = (int)Math.Round(v.Y / Epsilon);
+                int hz = (int)Math.Round(v.Z / Epsilon);
+                return hx ^ (hy << 8) ^ (hz << 16);
+            }
         }
     }
 }
